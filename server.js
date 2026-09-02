@@ -86,7 +86,7 @@ function broadcastChanged() {
 /* --------------------------------- app ----------------------------------- */
 const app = express();
 app.set("trust proxy", 1);
-app.use(express.json({ limit: "15mb" }));
+app.use(express.json({ limit: "25mb" }));
 app.use(cookieParser());
 
 function expectedToken() {

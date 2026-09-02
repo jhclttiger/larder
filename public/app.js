@@ -5,7 +5,7 @@
 var DEPARTMENTS = ["Produce","Meat & Seafood","Dairy & Eggs","Bakery","Pantry & Dry Goods","Canned & Jarred","Frozen","Spices & Condiments","Beverages","Other"];
 var DEPT_ICON = {"Produce":"🥬","Meat & Seafood":"🥩","Dairy & Eggs":"🥚","Bakery":"🍞","Pantry & Dry Goods":"🌾","Canned & Jarred":"🥫","Frozen":"🧊","Spices & Condiments":"🧂","Beverages":"🥤","Other":"🛒"};
 var DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-var MEALS = ["Breakfast","Lunch","Dinner"];
+var MEALS = ["Dinner"];
 var DIETARY_OPTIONS = ["Vegetarian","Vegan","Pescatarian","Gluten-Free","Dairy-Free","Nut-Free","Low-Carb","Kosher","Halal"];
 var CUISINE_OPTIONS = ["Italian","Mexican","Chinese","Japanese","Thai","Indian","Mediterranean","American","French","Korean","Vietnamese","Middle Eastern","BBQ","Greek","Spanish","Caribbean"];
 var AVATAR_OPTIONS = ["🧑‍🍳","😋","🌱","🌶️","🍜","🥗","🍕","🍣","🥑","🍔","🧑","👩","👨","🧒"];
@@ -286,9 +286,37 @@ function fileToBase64(file){
     reader.readAsDataURL(file);
   });
 }
+/* Phone camera photos can be huge (10-20MB+) once base64-encoded, well past
+   any sane upload limit. Shrink to a max dimension before sending — plenty
+   of detail for Claude to recognize a dish, a tiny fraction of the size. */
+function downscaleImage(file, maxDim, quality){
+  maxDim = maxDim || 1600; quality = quality || 0.82;
+  return new Promise(function(resolve, reject){
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function(){
+      URL.revokeObjectURL(url);
+      var w = img.naturalWidth, h = img.naturalHeight;
+      if(!w || !h){ reject(new Error("empty image")); return; }
+      var scale = Math.min(1, maxDim / Math.max(w, h));
+      var cw = Math.max(1, Math.round(w*scale)), ch = Math.max(1, Math.round(h*scale));
+      var canvas = document.createElement("canvas");
+      canvas.width = cw; canvas.height = ch;
+      var ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, cw, ch);
+      canvas.toBlob(function(blob){
+        if(blob) resolve(blob); else reject(new Error("canvas export failed"));
+      }, "image/jpeg", quality);
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error("couldn't read image")); };
+    img.src = url;
+  });
+}
 function guessRecipeFromPhoto(file, hint){
-  return fileToBase64(file).then(function(b64){
-    return api("/api/ai/snap","POST", {imageBase64: b64, mediaType: file.type||"image/jpeg", hint: hint});
+  return downscaleImage(file, 1600, 0.82).catch(function(){ return file; }).then(function(sendFile){
+    return fileToBase64(sendFile).then(function(b64){
+      return api("/api/ai/snap","POST", {imageBase64: b64, mediaType: sendFile.type||"image/jpeg", hint: hint});
+    });
   });
 }
 function normalizeParsedRecipe(parsed){
@@ -322,7 +350,7 @@ function renderTopbar(){
     return '<option value="'+u.id+'"'+(state.activeUserId===u.id?" selected":"")+'>'+esc(u.avatar||"🙂")+" "+esc(u.name)+'</option>';
   }).join("");
   el.innerHTML =
-    '<div class="brand"><span class="mark">🥘</span><div><h1>Larder</h1><div class="tag">recipes worth remembering</div></div></div>'+
+    '<div class="brand"><span class="mark">🥘</span><div><h1>Larder <span class="tag">(a cool room or large cupboard used to store food)</span></h1></div></div>'+
     '<div class="profile-picker"><label>Cooking for</label><select id="active-user-select">'+options+'</select></div>';
   document.getElementById("active-user-select").addEventListener("change", function(e){ state.activeUserId=e.target.value||null; render(); });
 }
@@ -630,6 +658,7 @@ function parsePreviewHtml(norm, mode){
   '</div>';
 }
 function apiErrorMessage(e){
+  if(e && e.code==="http_413") return "That photo was too large to send. Try a different photo, or a screenshot of it.";
   if(e && e.message) return e.message;
   return "Something went wrong talking to the server.";
 }
