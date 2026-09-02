@@ -55,6 +55,18 @@ function loadState() {
   }
 }
 let state = loadState();
+(function logStartupDataCheck() {
+  const recipeCount = Object.keys(state.recipes || {}).length;
+  const fileExisted = fs.existsSync(DATA_FILE);
+  console.log(
+    "Startup data check — DATA_DIR=" + DATA_DIR + ", data file " +
+    (fileExisted ? "found" : "NOT found (starting empty)") +
+    ", " + recipeCount + " recipe" + (recipeCount === 1 ? "" : "s") + " loaded." +
+    (recipeCount === 0
+      ? " If you expected existing recipes here, DATA_DIR is probably not pointing at your persistent volume — check that the volume's Mount Path matches DATA_DIR exactly."
+      : "")
+  );
+})();
 let saveQueued = false;
 let saveTimer = null;
 function persist() {
