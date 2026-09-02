@@ -361,7 +361,8 @@ var TABS = [
   {id:"snap", label:"Snap-to-Recipe", icon:"📸"},
   {id:"plan", label:"Meal Plan", icon:"🗓️"},
   {id:"grocery", label:"Grocery List", icon:"🧾"},
-  {id:"profiles", label:"Taste Profiles", icon:"👥"}
+  {id:"profiles", label:"Taste Profiles", icon:"👥"},
+  {id:"settings", label:"Settings", icon:"⚙️"}
 ];
 function renderTabs(){
   var el=document.getElementById("tabstrip");
@@ -380,6 +381,7 @@ function renderMain(){
   else if(state.tab==="plan") el.innerHTML = viewPlan();
   else if(state.tab==="grocery") el.innerHTML = viewGrocery();
   else if(state.tab==="profiles") el.innerHTML = viewProfiles();
+  else if(state.tab==="settings") el.innerHTML = viewSettings();
   wireMainEvents();
 }
 
@@ -439,12 +441,37 @@ function starsHtml(value, interactive, name){
 }
 
 /* ---- recipe detail modal ---- */
+var detailServings = 4;
+function fmtScaledQty(n){
+  if(typeof n!=="number" || isNaN(n)) return n==null?"":n;
+  if(n<=0) return "";
+  var whole = Math.floor(n);
+  var frac = n - whole;
+  if(frac < 0.02) return String(whole || (n<1? "":0));
+  var fractions = [[0.125,"1/8"],[0.1667,"1/6"],[0.2,"1/5"],[0.25,"1/4"],[0.3333,"1/3"],[0.375,"3/8"],[0.4,"2/5"],[0.5,"1/2"],[0.6,"3/5"],[0.625,"5/8"],[0.6667,"2/3"],[0.75,"3/4"],[0.8333,"5/6"],[0.875,"7/8"]];
+  var best=null, bestDiff=0.035;
+  fractions.forEach(function(f){ var d=Math.abs(f[0]-frac); if(d<bestDiff){bestDiff=d; best=f[1];} });
+  if(best) return (whole? whole+" ":"")+best;
+  var rounded = Math.round(n*100)/100;
+  return String(rounded);
+}
+function detailIngredientsHtml(r, targetServings){
+  var base = r.servings||4;
+  var mult = base>0 ? targetServings/base : 1;
+  return (r.ingredients||[]).map(function(i){
+    var q = (typeof i.qty==="number") ? fmtScaledQty(i.qty*mult) : (i.qty||"");
+    return '<li>'+esc([q, i.unit, i.name].filter(Boolean).join(" "))+' <span class="dept-pill">'+esc(i.department||"")+'</span></li>';
+  }).join("");
+}
 function openRecipeDetail(id){
   var r = state.recipes.find(function(x){return x.id===id;});
   if(!r) return;
   var avg = avgRating(r), wap = wouldAgainPct(r);
+  detailServings = r.servings||4;
   openModal(
-    '<div class="modal-head"><div><h2>'+esc(r.title)+'</h2><div class="meta-row" style="margin-top:4px">'+(r.cuisine?esc(r.cuisine)+" · ":"")+(r.prepTime?"prep "+fmtTime(r.prepTime)+" · ":"")+(r.cookTime?"cook "+fmtTime(r.cookTime)+" · ":"")+"serves "+(r.servings||4)+'</div></div>'+
+    '<div class="modal-head"><div><h2>'+esc(r.title)+'</h2><div class="meta-row" style="margin-top:4px">'+(r.cuisine?esc(r.cuisine)+" · ":"")+(r.prepTime?"prep "+fmtTime(r.prepTime)+" · ":"")+(r.cookTime?"cook "+fmtTime(r.cookTime)+" · ":"")+
+        '<span class="serve-stepper">serves <button type="button" class="icon-btn" data-serve-delta="-1" title="Fewer servings">−</button><b id="detail-serve-count" class="mono">'+detailServings+'</b><button type="button" class="icon-btn" data-serve-delta="1" title="More servings">+</button></span>'+
+      '</div></div>'+
       '<div style="display:flex;gap:4px"><button class="btn btn-sm btn-primary" data-action="cook-mode" data-id="'+r.id+'" title="Cook mode">👨‍🍳 Cook</button><button class="icon-btn" data-action="edit-recipe" data-id="'+r.id+'" title="Edit">✎</button><button class="icon-btn" data-action="delete-recipe" data-id="'+r.id+'" title="Delete">🗑</button><button class="icon-btn" onclick="closeModal()">✕</button></div>'+
     '</div>'+
     '<div class="modal-body">'+
@@ -453,9 +480,7 @@ function openRecipeDetail(id){
       '<div class="meta-row" style="margin-bottom:12px">'+(avg!==null?'<span class="stars static sm">'+starsHtml(avg,false)+'</span> <span class="hint" style="margin:0">household average</span>':'')+(wap!==null?'<span class="badge '+(wap>=50?"badge-good":"badge-warn")+'">'+wap+'% would make again</span>':'')+'</div>'+
       '<div class="tagrow" style="margin-bottom:14px">'+(r.tags||[]).map(function(t){return '<span class="tag">'+esc(t)+'</span>';}).join("")+'</div>'+
       '<h4 style="font-size:14px;margin-bottom:6px">Ingredients</h4>'+
-      '<ul style="margin:0 0 16px 18px;padding:0;font-size:13.5px;">'+(r.ingredients||[]).map(function(i){
-        return '<li>'+esc([i.qty!==null&&i.qty!==undefined?i.qty:"", i.unit, i.name].filter(Boolean).join(" "))+' <span class="dept-pill">'+esc(i.department||"")+'</span></li>';
-      }).join("")+'</ul>'+
+      '<ul id="detail-ingredients-list" style="margin:0 0 16px 18px;padding:0;font-size:13.5px;">'+detailIngredientsHtml(r, detailServings)+'</ul>'+
       '<h4 style="font-size:14px;margin-bottom:6px">Steps</h4>'+
       '<ol style="margin:0 0 18px 18px;padding:0;font-size:13.5px;">'+(r.steps||[]).map(function(s){return '<li style="margin-bottom:5px">'+esc(s)+'</li>';}).join("")+'</ol>'+
       '<h4 style="font-size:14px;margin-bottom:6px">Ratings</h4>'+
@@ -512,6 +537,15 @@ function wireRecipeDetailEvents(r){
     }
   });
   document.querySelector(".modal-head").addEventListener("click", function(e){
+    var serveBtn = e.target.closest("[data-serve-delta]");
+    if(serveBtn){
+      var delta = Number(serveBtn.getAttribute("data-serve-delta"));
+      detailServings = Math.max(1, detailServings + delta);
+      document.getElementById("detail-serve-count").textContent = detailServings;
+      var list = document.getElementById("detail-ingredients-list");
+      if(list) list.innerHTML = detailIngredientsHtml(r, detailServings);
+      return;
+    }
     var cookBtn = e.target.closest('[data-action="cook-mode"]');
     if(cookBtn){ openCookMode(r.id); return; }
     var editBtn = e.target.closest('[data-action="edit-recipe"]');
@@ -1273,6 +1307,97 @@ function openProfileForm(id){
     }});
 }
 
+/* ============================== SETTINGS TAB ============================== */
+var deferredInstallPrompt = null;
+window.addEventListener("beforeinstallprompt", function(e){
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  var btn = document.getElementById("install-app-btn");
+  if(btn) btn.classList.remove("hidden");
+});
+window.addEventListener("appinstalled", function(){ deferredInstallPrompt = null; });
+function isAppInstalled(){
+  return (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || !!window.navigator.standalone;
+}
+function installAppCardHtml(){
+  if(isAppInstalled()){
+    return '<h3 style="font-size:15px;margin-bottom:6px">📱 App installed</h3><p class="hint">You\'re using Larder as an installed app already — nice.</p>';
+  }
+  return '<h3 style="font-size:15px;margin-bottom:6px">📱 Add to your home screen</h3>'+
+    '<p class="hint" style="margin-bottom:10px">Install Larder like a regular app — a home screen icon, its own window, and it still opens even on a weak kitchen wifi connection.</p>'+
+    '<button class="btn btn-sm'+(deferredInstallPrompt?"":" hidden")+'" id="install-app-btn">Install Larder</button>'+
+    '<p class="hint" style="margin-top:10px"><b>iPhone/iPad (Safari):</b> tap the Share icon, then "Add to Home Screen".</p>'+
+    '<p class="hint"><b>Android (Chrome):</b> tap the ⋮ menu, then "Install app" — or use the button above if it\'s showing.</p>'+
+    '<p class="hint"><b>On a computer:</b> look for an install icon in the address bar.</p>';
+}
+function viewSettings(){
+  return '<div class="section-head"><div><h2>Settings</h2><p class="sub">Backups and app options.</p></div></div>'+
+    '<div class="card" style="padding:16px;margin-bottom:16px">'+
+      '<h3 style="font-size:15px;margin-bottom:6px">💾 Backup your data</h3>'+
+      '<p class="hint" style="margin-bottom:10px">Download everything in Larder — recipes, taste profiles, meal plans, and grocery lists — as one file. Keep a copy somewhere safe, just in case.</p>'+
+      '<button class="btn btn-primary btn-sm" id="download-backup-btn">⬇️ Download backup</button>'+
+    '</div>'+
+    '<div class="card" style="padding:16px;margin-bottom:16px">'+
+      '<h3 style="font-size:15px;margin-bottom:6px">Restore from a backup</h3>'+
+      '<p class="hint" style="margin-bottom:10px">This replaces everything currently in Larder with what\'s in the backup file you choose. Use it to recover from a problem, or to move to a new server.</p>'+
+      '<input type="file" id="restore-file-input" accept="application/json" class="hidden">'+
+      '<button class="btn btn-sm" id="restore-backup-btn">⬆️ Restore from file…</button>'+
+    '</div>'+
+    '<div class="card" style="padding:16px" id="install-app-card">'+installAppCardHtml()+'</div>';
+}
+function downloadBackup(){
+  fetch("/api/backup", {credentials:"same-origin"}).then(function(res){
+    if(!res.ok) throw new Error("download failed");
+    return res.blob();
+  }).then(function(blob){
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "larder-backup-"+isoDate(new Date())+".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    toast("Backup downloaded");
+  }).catch(function(){ toast("Couldn't download the backup","warn"); });
+}
+function runRestore(file){
+  var reader = new FileReader();
+  reader.onload = function(){
+    var parsed;
+    try{ parsed = JSON.parse(reader.result); }catch(e){ toast("That file isn't valid JSON","warn"); return; }
+    api("/api/restore","POST", parsed).then(function(){
+      return refreshState();
+    }).then(function(){
+      toast("Backup restored");
+      render();
+    }).catch(function(e){ toast(apiErrorMessage(e),"warn"); });
+  };
+  reader.onerror = function(){ toast("Couldn't read that file","warn"); };
+  reader.readAsText(file);
+}
+function wireSettingsTab(){
+  var dlBtn = document.getElementById("download-backup-btn");
+  if(dlBtn) dlBtn.addEventListener("click", downloadBackup);
+  var restoreBtn = document.getElementById("restore-backup-btn");
+  var restoreInput = document.getElementById("restore-file-input");
+  if(restoreBtn && restoreInput){
+    restoreBtn.addEventListener("click", function(){ restoreInput.click(); });
+    restoreInput.addEventListener("change", function(){
+      var file = restoreInput.files && restoreInput.files[0];
+      restoreInput.value = "";
+      if(!file) return;
+      confirmModal("Restore from this backup?", 'This replaces every recipe, profile, meal plan, and grocery list currently in Larder with what\'s in "'+file.name+'". This can\'t be undone.', function(){
+        runRestore(file);
+      }, "Restore");
+    });
+  }
+  var installBtn = document.getElementById("install-app-btn");
+  if(installBtn){
+    installBtn.addEventListener("click", function(){
+      if(!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      deferredInstallPrompt.userChoice.finally(function(){ deferredInstallPrompt = null; });
+    });
+  }
+}
+
 /* ============================== global wiring ============================== */
 function wireMainEvents(){
   var main = document.getElementById("main");
@@ -1295,6 +1420,7 @@ function wireMainEvents(){
   if(state.tab==="plan") wirePlanTab();
   if(state.tab==="grocery") wireGroceryTab();
   if(state.tab==="profiles") wireProfilesTab();
+  if(state.tab==="settings") wireSettingsTab();
 }
 
 /* Delegated handlers bound ONCE to the stable #main element (innerHTML is

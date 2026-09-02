@@ -242,6 +242,34 @@ app.get("/api/state", function (req, res) {
   res.json(state);
 });
 
+/* ---- backup / restore ---- */
+app.get("/api/backup", function (req, res) {
+  const today = new Date().toISOString().slice(0, 10);
+  res.set("Content-Type", "application/json");
+  res.set("Content-Disposition", 'attachment; filename="larder-backup-' + today + '.json"');
+  res.send(JSON.stringify(state, null, 2));
+});
+function isValidBackupShape(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  const keys = ["recipes", "users", "mealplans", "grocery"];
+  return keys.every(function (k) { return obj[k] && typeof obj[k] === "object" && !Array.isArray(obj[k]); });
+}
+app.post("/api/restore", function (req, res) {
+  const incoming = req.body;
+  if (!isValidBackupShape(incoming)) {
+    return res.status(400).json({ error: "That doesn't look like a Larder backup file." });
+  }
+  state = {
+    recipes: incoming.recipes || {},
+    users: incoming.users || {},
+    mealplans: incoming.mealplans || {},
+    grocery: incoming.grocery || {},
+  };
+  persist();
+  broadcastChanged();
+  res.json({ ok: true });
+});
+
 /* ---- recipes ---- */
 app.post("/api/recipes", function (req, res) {
   const id = uid();

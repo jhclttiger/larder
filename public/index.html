@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Larder</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🥘</text></svg>">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/icon-180.png">
+<meta name="theme-color" content="#b3760f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Larder">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Work+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
 :root{
@@ -129,6 +135,9 @@ label.field-label{display:block; font-size:12px; font-weight:600; color:var(--in
 .empty-state h3{color:var(--ink); margin-bottom:6px; font-size:17px;}
 .empty-state .mark{font-size:30px; display:block; margin-bottom:10px;}
 
+.serve-stepper{display:inline-flex; align-items:center; gap:2px;}
+.serve-stepper b{min-width:14px; text-align:center; font-size:12.5px;}
+.serve-stepper .icon-btn{padding:1px 5px; font-size:13px; line-height:1.4;}
 .stars{display:inline-flex; gap:1px;}
 .stars button{border:none;background:none;cursor:pointer;padding:1px;color:var(--line-strong);font-size:16px; line-height:1;}
 .stars button.filled{color:var(--accent);}
@@ -275,6 +284,13 @@ label.field-label{display:block; font-size:12px; font-weight:600; color:var(--in
 <div id="cook-root" class="hidden"></div>
 <div id="toast-root"></div>
 
+<script>
+if("serviceWorker" in navigator){
+  window.addEventListener("load", function(){
+    navigator.serviceWorker.register("/service-worker.js").catch(function(){});
+  });
+}
+</script>
 <script src="/app.js"></script>
 </body>
 </html>
