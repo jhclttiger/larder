@@ -445,7 +445,7 @@ function openRecipeDetail(id){
   var avg = avgRating(r), wap = wouldAgainPct(r);
   openModal(
     '<div class="modal-head"><div><h2>'+esc(r.title)+'</h2><div class="meta-row" style="margin-top:4px">'+(r.cuisine?esc(r.cuisine)+" · ":"")+(r.prepTime?"prep "+fmtTime(r.prepTime)+" · ":"")+(r.cookTime?"cook "+fmtTime(r.cookTime)+" · ":"")+"serves "+(r.servings||4)+'</div></div>'+
-      '<div style="display:flex;gap:4px"><button class="icon-btn" data-action="edit-recipe" data-id="'+r.id+'" title="Edit">✎</button><button class="icon-btn" data-action="delete-recipe" data-id="'+r.id+'" title="Delete">🗑</button><button class="icon-btn" onclick="closeModal()">✕</button></div>'+
+      '<div style="display:flex;gap:4px"><button class="btn btn-sm btn-primary" data-action="cook-mode" data-id="'+r.id+'" title="Cook mode">👨‍🍳 Cook</button><button class="icon-btn" data-action="edit-recipe" data-id="'+r.id+'" title="Edit">✎</button><button class="icon-btn" data-action="delete-recipe" data-id="'+r.id+'" title="Delete">🗑</button><button class="icon-btn" onclick="closeModal()">✕</button></div>'+
     '</div>'+
     '<div class="modal-body">'+
       (r.sourceUrl? '<p class="hint">Source: <a href="'+esc(r.sourceUrl)+'" target="_blank" rel="noopener">'+esc(r.sourceUrl)+'</a></p>':"")+
@@ -512,11 +512,208 @@ function wireRecipeDetailEvents(r){
     }
   });
   document.querySelector(".modal-head").addEventListener("click", function(e){
+    var cookBtn = e.target.closest('[data-action="cook-mode"]');
+    if(cookBtn){ openCookMode(r.id); return; }
     var editBtn = e.target.closest('[data-action="edit-recipe"]');
     if(editBtn){ closeModal(); openRecipeForm(r.id); return; }
     var delBtn = e.target.closest('[data-action="delete-recipe"]');
     if(delBtn){ confirmModal("Delete "+r.title+"?", "This removes the recipe and its ratings for everyone.", function(){ Data.deleteRecipe(r.id); toast("Recipe deleted"); }); return; }
   });
+}
+
+/* ============================== COOK MODE ============================== */
+var cookState = {recipeId:null, stepIndex:0};
+var cookModeActive = false;
+var cookWakeLock = null;
+var cookTimer = {interval:null, running:false, paused:false, remaining:0, total:0, endsAt:0};
+var cookTimerPanelOpen = false;
+
+function openCookMode(id){
+  var r = state.recipes.find(function(x){return x.id===id;});
+  if(!r) return;
+  if(!(r.steps && r.steps.length)){ toast("This recipe doesn't have any steps yet","warn"); return; }
+  closeModal();
+  cookState = {recipeId:id, stepIndex:0};
+  cookModeActive = true;
+  cookTimerPanelOpen = false;
+  resetCookTimer();
+  document.getElementById("cook-root").classList.remove("hidden");
+  renderCookMode();
+  requestCookWakeLock();
+  document.addEventListener("keydown", cookKeyHandler);
+}
+function closeCookMode(){
+  cookModeActive = false;
+  document.getElementById("cook-root").classList.add("hidden");
+  document.getElementById("cook-root").innerHTML = "";
+  releaseCookWakeLock();
+  resetCookTimer();
+  document.removeEventListener("keydown", cookKeyHandler);
+}
+window.closeCookMode = closeCookMode;
+function cookKeyHandler(e){
+  if(!cookModeActive) return;
+  if(e.key==="Escape"){ closeCookMode(); return; }
+  if(e.key==="ArrowRight"){ var n=document.getElementById("cook-next-btn"); if(n) n.click(); }
+  if(e.key==="ArrowLeft"){ var p=document.getElementById("cook-prev-btn"); if(p) p.click(); }
+}
+function cookStepHtml(steps, activeIndex){
+  return steps.map(function(s,i){
+    return '<div class="cook-step'+(i===activeIndex?" active":"")+'" data-step-index="'+i+'">'+
+      '<span class="cook-step-num">'+(i+1)+'</span><span class="cook-step-text">'+esc(s)+'</span>'+
+    '</div>';
+  }).join("");
+}
+function renderCookMode(){
+  var r = state.recipes.find(function(x){return x.id===cookState.recipeId;});
+  if(!r) return;
+  var steps = r.steps||[];
+  var root = document.getElementById("cook-root");
+  root.innerHTML =
+    '<div class="cook-head">'+
+      '<div><h2>'+esc(r.title)+'</h2><div class="cook-progress mono">Step '+(cookState.stepIndex+1)+' of '+steps.length+'</div></div>'+
+      '<div style="display:flex;gap:6px;align-items:center">'+
+        '<button class="btn btn-sm" id="cook-timer-toggle">⏱ Timer</button>'+
+        '<button class="icon-btn" id="cook-close-btn" title="Exit cook mode">✕</button>'+
+      '</div>'+
+    '</div>'+
+    '<div class="cook-timer-panel'+(cookTimerPanelOpen?"":" hidden")+'" id="cook-timer-panel">'+cookTimerPanelHtml()+'</div>'+
+    '<div class="cook-body" id="cook-steps">'+cookStepHtml(steps, cookState.stepIndex)+'</div>'+
+    '<div class="cook-nav">'+
+      '<button class="btn" id="cook-prev-btn"'+(cookState.stepIndex===0?" disabled":"")+'>‹ Previous</button>'+
+      '<button class="btn btn-primary" id="cook-next-btn">'+(cookState.stepIndex===steps.length-1?"Done ✓":"Next ›")+'</button>'+
+    '</div>';
+  wireCookMode(steps);
+  var activeEl = root.querySelector(".cook-step.active");
+  if(activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({block:"center", behavior:"smooth"});
+}
+function wireCookMode(steps){
+  document.getElementById("cook-close-btn").addEventListener("click", closeCookMode);
+  document.getElementById("cook-prev-btn").addEventListener("click", function(){
+    if(cookState.stepIndex>0){ cookState.stepIndex--; renderCookMode(); }
+  });
+  document.getElementById("cook-next-btn").addEventListener("click", function(){
+    if(cookState.stepIndex<steps.length-1){ cookState.stepIndex++; renderCookMode(); }
+    else { closeCookMode(); toast("Nice work — enjoy!"); }
+  });
+  document.getElementById("cook-steps").addEventListener("click", function(e){
+    var stepEl = e.target.closest(".cook-step");
+    if(stepEl){ cookState.stepIndex = Number(stepEl.getAttribute("data-step-index")); renderCookMode(); }
+  });
+  document.getElementById("cook-timer-toggle").addEventListener("click", function(){
+    cookTimerPanelOpen = !cookTimerPanelOpen;
+    document.getElementById("cook-timer-panel").classList.toggle("hidden", !cookTimerPanelOpen);
+  });
+  wireCookTimerPanel();
+}
+
+/* ---- cook mode: screen wake lock ---- */
+function requestCookWakeLock(){
+  if(!("wakeLock" in navigator)) return;
+  navigator.wakeLock.request("screen").then(function(lock){ cookWakeLock = lock; }).catch(function(){ cookWakeLock = null; });
+}
+function releaseCookWakeLock(){
+  if(cookWakeLock){ cookWakeLock.release().catch(function(){}); cookWakeLock = null; }
+}
+document.addEventListener("visibilitychange", function(){
+  if(cookModeActive && document.visibilityState==="visible") requestCookWakeLock();
+});
+
+/* ---- cook mode: timer ---- */
+function fmtMMSS(sec){
+  sec = Math.max(0, Math.round(sec));
+  var m = Math.floor(sec/60), s = sec%60;
+  return (m<10?"0":"")+m+":"+(s<10?"0":"")+s;
+}
+function cookTimerPanelHtml(){
+  if(cookTimer.running || cookTimer.paused){
+    return '<div class="timer-display mono" id="cook-timer-display">'+fmtMMSS(cookTimer.remaining)+'</div>'+
+      '<div class="timer-controls">'+
+        '<button type="button" class="btn btn-sm" id="cook-timer-pause">'+(cookTimer.paused?"Resume":"Pause")+'</button>'+
+        '<button type="button" class="btn btn-sm" id="cook-timer-reset">Reset</button>'+
+      '</div>';
+  }
+  return '<div class="timer-presets">'+
+      [1,3,5,10,15,20].map(function(m){return '<button type="button" class="btn btn-sm" data-min="'+m+'">'+m+' min</button>';}).join("")+
+    '</div>'+
+    '<div class="timer-custom"><input type="number" min="1" id="cook-timer-custom" placeholder="custom min"><button type="button" class="btn btn-sm btn-primary" id="cook-timer-custom-start">Start</button></div>';
+}
+function wireCookTimerPanel(){
+  var panel = document.getElementById("cook-timer-panel");
+  panel.addEventListener("click", function(e){
+    var presetBtn = e.target.closest("[data-min]");
+    if(presetBtn){ startCookTimer(Number(presetBtn.getAttribute("data-min"))); return; }
+    if(e.target.id==="cook-timer-custom-start"){
+      var v = Number(document.getElementById("cook-timer-custom").value);
+      if(v>0) startCookTimer(v);
+      return;
+    }
+    if(e.target.id==="cook-timer-pause"){ toggleCookTimerPause(); return; }
+    if(e.target.id==="cook-timer-reset"){ resetCookTimer(); refreshCookTimerPanel(); return; }
+  });
+}
+function refreshCookTimerPanel(){
+  var panel = document.getElementById("cook-timer-panel");
+  if(!panel) return;
+  panel.innerHTML = cookTimerPanelHtml();
+}
+function startCookTimer(minutes){
+  clearInterval(cookTimer.interval);
+  cookTimer.total = minutes*60;
+  cookTimer.remaining = cookTimer.total;
+  cookTimer.running = true;
+  cookTimer.paused = false;
+  cookTimer.endsAt = Date.now() + cookTimer.total*1000;
+  cookTimer.interval = setInterval(tickCookTimer, 500);
+  cookTimerPanelOpen = true;
+  var panelEl = document.getElementById("cook-timer-panel");
+  if(panelEl) panelEl.classList.remove("hidden");
+  refreshCookTimerPanel();
+}
+function tickCookTimer(){
+  if(!cookTimer.running || cookTimer.paused) return;
+  var remaining = Math.round((cookTimer.endsAt - Date.now())/1000);
+  cookTimer.remaining = remaining;
+  var disp = document.getElementById("cook-timer-display");
+  if(disp) disp.textContent = fmtMMSS(Math.max(0,remaining));
+  if(remaining<=0){
+    clearInterval(cookTimer.interval);
+    cookTimer.running = false;
+    cookTimerFinished();
+  }
+}
+function toggleCookTimerPause(){
+  if(!cookTimer.running) return;
+  if(cookTimer.paused){ cookTimer.paused = false; cookTimer.endsAt = Date.now() + cookTimer.remaining*1000; }
+  else { cookTimer.paused = true; }
+  refreshCookTimerPanel();
+}
+function resetCookTimer(){
+  clearInterval(cookTimer.interval);
+  cookTimer = {interval:null, running:false, paused:false, remaining:0, total:0, endsAt:0};
+  refreshCookTimerPanel();
+}
+function cookTimerFinished(){
+  playCookTimerSound();
+  toast("⏱ Timer done!");
+  if(navigator.vibrate){ try{ navigator.vibrate([200,100,200]); }catch(e){} }
+  var disp = document.getElementById("cook-timer-display");
+  if(disp){ disp.textContent = "Done!"; disp.classList.add("timer-done"); }
+}
+function playCookTimerSound(){
+  try{
+    var ctx = new (window.AudioContext||window.webkitAudioContext)();
+    var now = ctx.currentTime;
+    [0,0.3,0.6].forEach(function(t){
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "sine"; o.frequency.value = 880;
+      o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.0001, now+t);
+      g.gain.exponentialRampToValueAtTime(0.3, now+t+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now+t+0.25);
+      o.start(now+t); o.stop(now+t+0.3);
+    });
+  }catch(e){}
 }
 
 /* ---- recipe add/edit form ---- */
@@ -549,6 +746,7 @@ function recipeFormFieldsHtml(r){
         '<button type="button" class="btn btn-sm btn-ghost'+(r.image?"":" hidden")+'" id="f-image-remove">Remove</button>'+
       '</div>'+
       '<p class="hint">Upload a photo from your device, or paste a link to an image already online.</p>'+
+      '<button type="button" class="btn btn-primary btn-sm" id="save-recipe-btn-top" style="margin-top:8px">💾 Save recipe</button>'+
     '</div>'+
     '<div class="field"><label class="field-label">Source link (optional)</label><input type="url" id="f-source" value="'+esc(r.sourceUrl)+'" placeholder="https://…"></div>'+
     '<div class="field"><label class="field-label">Ingredients</label><div id="f-ingredients">'+(r.ingredients&&r.ingredients.length?r.ingredients:[{qty:"",unit:"",name:"",department:""}]).map(ingredientRowHtml).join("")+'</div>'+
@@ -615,13 +813,16 @@ function wireRecipeForm(original, editId){
   urlInput.addEventListener("input", function(){ formImageValue = urlInput.value.trim(); removeBtn.classList.toggle("hidden", !formImageValue); });
   removeBtn.addEventListener("click", function(){ urlInput.value=""; setImage(""); });
 
-  document.getElementById("save-recipe-btn").addEventListener("click", function(){
+  function doSaveRecipe(){
     var data = readRecipeForm();
     if(!data.title){ toast("Give the recipe a title first","warn"); return; }
     if(editId){ Data.updateRecipe(editId, data); toast("Recipe updated"); }
     else { Data.addRecipe(Object.assign({ratings:{}}, data)); toast("Recipe saved"); }
     closeModal();
-  });
+  }
+  document.getElementById("save-recipe-btn").addEventListener("click", doSaveRecipe);
+  var topSaveBtn = document.getElementById("save-recipe-btn-top");
+  if(topSaveBtn) topSaveBtn.addEventListener("click", doSaveRecipe);
 }
 function wireChipField(container){
   var input = container.querySelector("input");
