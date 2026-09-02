@@ -312,10 +312,10 @@ function downscaleImage(file, maxDim, quality){
     img.src = url;
   });
 }
-function guessRecipeFromPhoto(file, hint){
+function guessRecipeFromPhoto(file, hint, mode){
   return downscaleImage(file, 1600, 0.82).catch(function(){ return file; }).then(function(sendFile){
     return fileToBase64(sendFile).then(function(b64){
-      return api("/api/ai/snap","POST", {imageBase64: b64, mediaType: sendFile.type||"image/jpeg", hint: hint});
+      return api("/api/ai/snap","POST", {imageBase64: b64, mediaType: sendFile.type||"image/jpeg", hint: hint, mode: mode||"dish"});
     });
   });
 }
@@ -522,7 +522,7 @@ function wireRecipeDetailEvents(r){
 }
 
 /* ============================== COOK MODE ============================== */
-var cookState = {recipeId:null, stepIndex:0};
+var cookState = {recipeId:null, stepIndex:0, checkedIngredients:{}};
 var cookModeActive = false;
 var cookWakeLock = null;
 var cookTimer = {interval:null, running:false, paused:false, remaining:0, total:0, endsAt:0};
@@ -533,7 +533,7 @@ function openCookMode(id){
   if(!r) return;
   if(!(r.steps && r.steps.length)){ toast("This recipe doesn't have any steps yet","warn"); return; }
   closeModal();
-  cookState = {recipeId:id, stepIndex:0};
+  cookState = {recipeId:id, stepIndex:0, checkedIngredients:{}};
   cookModeActive = true;
   cookTimerPanelOpen = false;
   resetCookTimer();
@@ -564,10 +564,22 @@ function cookStepHtml(steps, activeIndex){
     '</div>';
   }).join("");
 }
+function cookIngredientsHtml(ingredients){
+  if(!ingredients.length) return "";
+  return '<div class="cook-ingredients-wrap">'+
+    '<h3 class="cook-section-title">Ingredients</h3>'+
+    '<div id="cook-ingredients">'+ingredients.map(function(i,idx){
+      var checked = !!cookState.checkedIngredients[idx];
+      var label = esc([i.qty!==null&&i.qty!==undefined?i.qty:"", i.unit, i.name].filter(Boolean).join(" "));
+      return '<label class="cook-ingredient'+(checked?" checked":"")+'"><input type="checkbox" data-ing-idx="'+idx+'"'+(checked?" checked":"")+'><span>'+label+'</span></label>';
+    }).join("")+'</div>'+
+  '</div>';
+}
 function renderCookMode(){
   var r = state.recipes.find(function(x){return x.id===cookState.recipeId;});
   if(!r) return;
   var steps = r.steps||[];
+  var ingredients = r.ingredients||[];
   var root = document.getElementById("cook-root");
   root.innerHTML =
     '<div class="cook-head">'+
@@ -578,7 +590,11 @@ function renderCookMode(){
       '</div>'+
     '</div>'+
     '<div class="cook-timer-panel'+(cookTimerPanelOpen?"":" hidden")+'" id="cook-timer-panel">'+cookTimerPanelHtml()+'</div>'+
-    '<div class="cook-body" id="cook-steps">'+cookStepHtml(steps, cookState.stepIndex)+'</div>'+
+    '<div class="cook-body">'+
+      cookIngredientsHtml(ingredients)+
+      '<h3 class="cook-section-title">Steps</h3>'+
+      '<div id="cook-steps">'+cookStepHtml(steps, cookState.stepIndex)+'</div>'+
+    '</div>'+
     '<div class="cook-nav">'+
       '<button class="btn" id="cook-prev-btn"'+(cookState.stepIndex===0?" disabled":"")+'>‹ Previous</button>'+
       '<button class="btn btn-primary" id="cook-next-btn">'+(cookState.stepIndex===steps.length-1?"Done ✓":"Next ›")+'</button>'+
@@ -589,6 +605,17 @@ function renderCookMode(){
 }
 function wireCookMode(steps){
   document.getElementById("cook-close-btn").addEventListener("click", closeCookMode);
+  var ingWrap = document.getElementById("cook-ingredients");
+  if(ingWrap){
+    ingWrap.addEventListener("change", function(e){
+      var cb = e.target.closest("input[type=checkbox]");
+      if(!cb) return;
+      var idx = cb.getAttribute("data-ing-idx");
+      cookState.checkedIngredients[idx] = cb.checked;
+      var lbl = cb.closest(".cook-ingredient");
+      if(lbl) lbl.classList.toggle("checked", cb.checked);
+    });
+  }
   document.getElementById("cook-prev-btn").addEventListener("click", function(){
     if(cookState.stepIndex>0){ cookState.stepIndex--; renderCookMode(); }
   });
@@ -911,20 +938,54 @@ function apiErrorMessage(e){
 
 /* ============================== SNAP TAB ============================== */
 var snapFile = null, lastSnap = null;
+var snapMode = "dish";
+var SNAP_MODE_COPY = {
+  dish: {
+    sub: "Photograph a dish at a restaurant and get a homemade recipe to try recreating it.",
+    photoLabel: "Photo of the dish",
+    dropHint: "📸 Click to choose a photo",
+    hintLabel: "Restaurant / dish name (optional, helps accuracy)",
+    hintPlaceholder: "e.g. spicy tuna crispy rice at Nobu",
+    btnIdleLabel: "✨ Guess the recipe",
+    btnBusyLabel: "Looking closely…",
+    emptyTitle: "No guess yet",
+    emptyBody: "Upload a photo to reverse-engineer the recipe.",
+    emptyMark: "🍽️",
+    sourceType: "restaurant-photo"
+  },
+  written: {
+    sub: "Photograph a recipe from a magazine, cookbook, or recipe card and Claude will type it up for you.",
+    photoLabel: "Photo of the written recipe",
+    dropHint: "📖 Click to choose a photo of the page",
+    hintLabel: "Anything to note (optional)",
+    hintPlaceholder: "e.g. the bottom of the page was cut off",
+    btnIdleLabel: "✨ Transcribe the recipe",
+    btnBusyLabel: "Reading the page…",
+    emptyTitle: "Nothing transcribed yet",
+    emptyBody: "Upload a clear photo of the recipe page.",
+    emptyMark: "📖",
+    sourceType: "written-photo"
+  }
+};
 function viewSnap(){
   var aiOk = state.aiEnabled;
-  return '<div class="section-head"><div><h2>Snap-to-Recipe</h2><p class="sub">Photograph a dish at a restaurant and get a homemade recipe to try recreating it.</p></div></div>'+
+  var copy = SNAP_MODE_COPY[snapMode];
+  return '<div class="section-head"><div><h2>Snap-to-Recipe</h2><p class="sub">'+copy.sub+'</p></div></div>'+
     (!aiOk? '<div class="banner info">AI photo analysis isn\'t configured on this server yet. Ask whoever runs it to add an ANTHROPIC_API_KEY.</div>' : '')+
+    '<div class="segmented" id="snap-mode-toggle" style="margin-bottom:14px">'+
+      '<button type="button" data-mode="dish" class="'+(snapMode==="dish"?"active":"")+'">🍽️ Restaurant dish</button>'+
+      '<button type="button" data-mode="written" class="'+(snapMode==="written"?"active":"")+'">📖 Written recipe</button>'+
+    '</div>'+
     '<div class="import-layout">'+
       '<div>'+
-        '<div class="field"><label class="field-label">Photo of the dish</label>'+
-          '<div class="dropzone" id="snap-dropzone">'+(snapFile? '<img class="photo-preview" id="snap-preview" src="'+snapPreviewUrl()+'">' : '<div>📸 Click to choose a photo</div>')+
+        '<div class="field"><label class="field-label">'+copy.photoLabel+'</label>'+
+          '<div class="dropzone" id="snap-dropzone">'+(snapFile? '<img class="photo-preview" id="snap-preview" src="'+snapPreviewUrl()+'">' : '<div>'+copy.dropHint+'</div>')+
           '<input type="file" id="snap-file-input" accept="image/*" class="hidden"></div>'+
         '</div>'+
-        '<div class="field"><label class="field-label">Restaurant / dish name (optional, helps accuracy)</label><input type="text" id="snap-hint" placeholder="e.g. spicy tuna crispy rice at Nobu"></div>'+
-        '<button class="btn btn-primary" id="snap-btn" '+(aiOk?"":"disabled")+'><span id="snap-btn-label">✨ Guess the recipe</span></button>'+
+        '<div class="field"><label class="field-label">'+copy.hintLabel+'</label><input type="text" id="snap-hint" placeholder="'+copy.hintPlaceholder+'"></div>'+
+        '<button class="btn btn-primary" id="snap-btn" '+(aiOk?"":"disabled")+'><span id="snap-btn-label">'+copy.btnIdleLabel+'</span></button>'+
       '</div>'+
-      '<div id="snap-preview-panel"><div class="empty-state"><span class="mark">🍽️</span><h3>No guess yet</h3><p>Upload a photo to reverse-engineer the recipe.</p></div></div>'+
+      '<div id="snap-preview-panel"><div class="empty-state"><span class="mark">'+copy.emptyMark+'</span><h3>'+copy.emptyTitle+'</h3><p>'+copy.emptyBody+'</p></div></div>'+
     '</div>';
 }
 function snapPreviewUrl(){ return snapFile ? URL.createObjectURL(snapFile) : ""; }
@@ -938,22 +999,34 @@ function wireSnapTab(){
   });
   var btn = document.getElementById("snap-btn");
   if(btn) btn.addEventListener("click", function(){ runSnapGuess(); });
+  var modeToggle = document.getElementById("snap-mode-toggle");
+  if(modeToggle){
+    modeToggle.addEventListener("click", function(e){
+      var b = e.target.closest("[data-mode]");
+      if(!b) return;
+      var m = b.getAttribute("data-mode");
+      if(m===snapMode) return;
+      snapMode = m; snapFile = null; lastSnap = null;
+      renderMain();
+    });
+  }
 }
 function runSnapGuess(){
   if(!snapFile){ toast("Choose a photo first","warn"); return; }
+  var copy = SNAP_MODE_COPY[snapMode];
   var hint = document.getElementById("snap-hint").value.trim();
   var btn=document.getElementById("snap-btn");
-  btn.disabled=true; document.getElementById("snap-btn-label").innerHTML='<span class="spinner"></span> Looking closely…';
-  guessRecipeFromPhoto(snapFile, hint).then(function(parsed){
+  btn.disabled=true; document.getElementById("snap-btn-label").innerHTML='<span class="spinner"></span> '+copy.btnBusyLabel;
+  guessRecipeFromPhoto(snapFile, hint, snapMode).then(function(parsed){
     var norm = normalizeParsedRecipe(parsed);
-    norm.sourceType="restaurant-photo";
+    norm.sourceType=copy.sourceType;
     norm.sourceUrl="";
     lastSnap = norm;
     document.getElementById("snap-preview-panel").innerHTML = parsePreviewHtml(norm, "snap");
   }).catch(function(e){
     toast(apiErrorMessage(e),"warn");
   }).finally(function(){
-    btn.disabled=false; document.getElementById("snap-btn-label").textContent="✨ Guess the recipe";
+    btn.disabled=false; document.getElementById("snap-btn-label").textContent=copy.btnIdleLabel;
   });
 }
 
@@ -975,7 +1048,7 @@ function viewPlan(){
   }).join("");
   var headCells = DAYS.map(function(d,i){ var dt=addDays(monday,i); return '<div class="head-cell">'+d+' <span class="mono" style="color:var(--ink-faint)">'+dt.getDate()+'</span></div>'; }).join("");
   return '<div class="section-head"><div><h2>Meal Plan</h2><p class="sub">Tap a slot to add a recipe'+(activeUser? " · recommendations favor "+esc(activeUser.name):"")+'.</p></div>'+
-    '<div style="display:flex;gap:8px"><button class="btn btn-sm" id="autofill-btn">✨ Auto-fill week</button><button class="btn btn-sm btn-danger" id="clearweek-btn">Clear week</button></div></div>'+
+    '<div style="display:flex;gap:8px"><button class="btn btn-sm" id="calendar-feed-btn">📅 Add to Calendar</button><button class="btn btn-sm" id="autofill-btn">✨ Auto-fill week</button><button class="btn btn-sm btn-danger" id="clearweek-btn">Clear week</button></div></div>'+
     '<div class="week-nav"><button class="icon-btn" id="prev-week">←</button><span class="range">'+formatWeekRange(monday)+'</span><button class="icon-btn" id="next-week">→</button><button class="btn btn-sm btn-ghost" id="this-week-btn">This week</button></div>'+
     '<div class="meal-grid"><div></div>'+headCells+rows+'</div>';
 }
@@ -986,6 +1059,7 @@ function wirePlanTab(){
   next.addEventListener("click", function(){ Data.switchWeek(isoDate(addDays(new Date(state.weekStart+"T00:00:00"),7))); });
   tw.addEventListener("click", function(){ Data.switchWeek(isoDate(getMonday(new Date()))); });
   document.getElementById("autofill-btn").addEventListener("click", autoFillWeek);
+  document.getElementById("calendar-feed-btn").addEventListener("click", openCalendarFeedModal);
   document.getElementById("clearweek-btn").addEventListener("click", function(){
     confirmModal("Clear this week?", "This empties every meal slot for the week.", function(){
       var chain = Promise.resolve();
@@ -993,6 +1067,34 @@ function wirePlanTab(){
       chain.then(function(){ toast("Week cleared"); });
     }, "Clear");
   });
+}
+function openCalendarFeedModal(){
+  openModal(
+    '<div class="modal-head"><h3>Add meal plan to your calendar</h3><button class="icon-btn" onclick="closeModal()">✕</button></div>'+
+    '<div class="modal-body" id="calendar-feed-body"><p class="hint">Loading your calendar link…</p></div>'
+  , {onMount: function(){
+      api("/api/calendar-info").then(function(info){
+        var url = window.location.origin + "/api/calendar.ics?token=" + info.token;
+        var body = document.getElementById("calendar-feed-body");
+        if(!body) return;
+        body.innerHTML =
+          '<p style="margin-top:0">This link always reflects your current meal plan — every dinner you\'ve scheduled shows up as an event on its date. Subscribing (not just opening the link) means it keeps itself up to date automatically.</p>'+
+          '<div style="display:flex;gap:8px;margin-bottom:14px"><input type="text" id="calendar-feed-url" readonly value="'+esc(url)+'" style="flex:1"><button class="btn btn-sm" id="calendar-feed-copy">Copy</button></div>'+
+          '<p class="hint" style="margin-bottom:4px"><b>Google Calendar:</b> on a computer, go to Other calendars → + → "From URL" and paste this link.</p>'+
+          '<p class="hint" style="margin-bottom:4px"><b>Apple Calendar:</b> File → New Calendar Subscription, paste this link.</p>'+
+          '<p class="hint">Calendars usually refresh a subscribed link every few hours, not instantly — that\'s normal.</p>';
+        document.getElementById("calendar-feed-copy").addEventListener("click", function(){
+          var input = document.getElementById("calendar-feed-url");
+          input.select(); input.setSelectionRange(0,99999);
+          if(navigator.clipboard && navigator.clipboard.writeText){
+            navigator.clipboard.writeText(url).then(function(){ toast("Link copied"); }).catch(function(){ document.execCommand("copy"); toast("Link copied"); });
+          } else { document.execCommand("copy"); toast("Link copied"); }
+        });
+      }).catch(function(e){
+        var body = document.getElementById("calendar-feed-body");
+        if(body) body.innerHTML = '<p class="hint">'+esc(apiErrorMessage(e))+'</p>';
+      });
+    }});
 }
 function openSlotPicker(key){
   var activeUser = state.users.find(function(u){return u.id===state.activeUserId;});

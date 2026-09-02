@@ -104,6 +104,13 @@ app.use(cookieParser());
 function expectedToken() {
   return crypto.createHmac("sha256", SESSION_SECRET).update(HOUSEHOLD_PASSCODE).digest("hex");
 }
+/* A stable secret embedded in the calendar subscription URL. Calendar apps
+   (Google Calendar, Apple Calendar, Outlook) fetch this URL directly with no
+   cookies, so it can't go through the normal passcode auth — this token is
+   the URL's only protection, which is the standard model for "secret address"
+   calendar feeds. It's derived from SESSION_SECRET so it stays the same
+   across restarts as long as DATA_DIR is a real persistent volume. */
+const CALENDAR_TOKEN = crypto.createHmac("sha256", SESSION_SECRET).update("larder-calendar-feed").digest("hex").slice(0, 32);
 function requireAuth(req, res, next) {
   if (!HOUSEHOLD_PASSCODE) return next(); // no passcode configured -> open access
   const token = req.cookies && req.cookies.larder_session;
@@ -132,8 +139,89 @@ app.get("/api/config", function (req, res) {
 });
 
 app.use("/api", function (req, res, next) {
-  if (req.path === "/login" || req.path === "/logout" || req.path === "/config") return next();
+  if (req.path === "/login" || req.path === "/logout" || req.path === "/config" || req.path === "/calendar.ics") return next();
   return requireAuth(req, res, next);
+});
+
+app.get("/api/calendar-info", requireAuth, function (req, res) {
+  res.json({ token: CALENDAR_TOKEN });
+});
+
+/* ---- meal plan -> calendar (.ics) feed ---- */
+const ICS_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function addDaysToIso(iso, n) {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function isoToIcsDate(iso) {
+  return iso.replace(/-/g, "");
+}
+function icsEscape(s) {
+  return String(s == null ? "" : s)
+    .replace(/\\/g, "\\\\")
+    .replace(/;/g, "\\;")
+    .replace(/,/g, "\\,")
+    .replace(/\n/g, "\\n");
+}
+function foldIcsLine(line) {
+  if (line.length <= 75) return line;
+  let out = line.slice(0, 75);
+  let rest = line.slice(75);
+  while (rest.length > 0) {
+    out += "\r\n " + rest.slice(0, 74);
+    rest = rest.slice(74);
+  }
+  return out;
+}
+function buildMealPlanIcs() {
+  const lines = [];
+  lines.push("BEGIN:VCALENDAR");
+  lines.push("VERSION:2.0");
+  lines.push("PRODID:-//Larder//Meal Plan//EN");
+  lines.push("CALSCALE:GREGORIAN");
+  lines.push("METHOD:PUBLISH");
+  lines.push("X-WR-CALNAME:Larder Meal Plan");
+  lines.push("REFRESH-INTERVAL;VALUE=DURATION:PT12H");
+  lines.push("X-PUBLISHED-TTL:PT12H");
+  const dtstamp = new Date().toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  const weeks = state.mealplans || {};
+  Object.keys(weeks).forEach(function (weekStart) {
+    const slots = (weeks[weekStart] && weeks[weekStart].slots) || {};
+    Object.keys(slots).forEach(function (slotKey) {
+      const slot = slots[slotKey];
+      if (!slot || !slot.r) return;
+      const recipe = state.recipes[slot.r];
+      if (!recipe) return;
+      const parts = slotKey.split("-");
+      const day = parts[0];
+      const meal = parts.slice(1).join("-") || "Meal";
+      const dayIdx = ICS_DAYS.indexOf(day);
+      if (dayIdx === -1) return;
+      const dateIso = addDaysToIso(weekStart, dayIdx);
+      const dateNext = addDaysToIso(dateIso, 1);
+      const ingredientsList = (recipe.ingredients || [])
+        .map(function (i) { return [i.qty, i.unit, i.name].filter(Boolean).join(" "); })
+        .join(", ");
+      const desc = "Serves " + (slot.s || recipe.servings || 4) + (ingredientsList ? ". Ingredients: " + ingredientsList : "");
+      lines.push("BEGIN:VEVENT");
+      lines.push(foldIcsLine("UID:" + weekStart + "-" + encodeURIComponent(slotKey) + "@larder"));
+      lines.push("DTSTAMP:" + dtstamp);
+      lines.push("DTSTART;VALUE=DATE:" + isoToIcsDate(dateIso));
+      lines.push("DTEND;VALUE=DATE:" + isoToIcsDate(dateNext));
+      lines.push(foldIcsLine("SUMMARY:" + icsEscape(meal + ": " + recipe.title)));
+      lines.push(foldIcsLine("DESCRIPTION:" + icsEscape(desc)));
+      lines.push("END:VEVENT");
+    });
+  });
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n") + "\r\n";
+}
+app.get("/api/calendar.ics", function (req, res) {
+  if (!CALENDAR_TOKEN || req.query.token !== CALENDAR_TOKEN) return res.status(401).send("Unauthorized");
+  res.set("Content-Type", "text/calendar; charset=utf-8");
+  res.set("Content-Disposition", 'inline; filename="larder-meal-plan.ics"');
+  res.send(buildMealPlanIcs());
 });
 
 /* ---- live updates ---- */
@@ -298,12 +386,18 @@ app.post("/api/ai/snap", async function (req, res) {
   const imageBase64 = req.body && req.body.imageBase64;
   const mediaType = (req.body && req.body.mediaType) || "image/jpeg";
   const hint = String((req.body && req.body.hint) || "");
+  const mode = (req.body && req.body.mode) === "written" ? "written" : "dish";
   if (!imageBase64) return res.status(400).json({ error: "No photo received." });
-  const prompt =
-    "You are looking at a photo of a restaurant dish. Reverse-engineer a homemade recipe that would let a home cook recreate it: identify the " +
-    "likely dish and cuisine, then propose realistic ingredients (sensible home portions) and clear steps.\n" +
-    (hint ? 'The cook says: "' + hint + '"\n' : "") + "\n" + RECIPE_SHAPE_NOTE +
-    '\n\nAlways fill "notes" with a short line noting this recipe was recreated from a photo and is an educated guess to adjust to taste.';
+  const prompt = mode === "written"
+    ? "You are looking at a photo of a WRITTEN recipe — likely a page from a magazine, cookbook, printed card, or handwritten note. " +
+      "Read it carefully and transcribe it accurately into the standard recipe format below. Keep the original quantities, ingredients, and " +
+      "steps as written; only lightly clean up phrasing (fix obvious OCR/scan artifacts, normalize formatting) without inventing content that " +
+      "isn't there. If part of the text is cut off, blurry, or illegible, make a reasonable best guess and mention what was unclear in \"notes\".\n" +
+      (hint ? 'The cook adds this context: "' + hint + '"\n' : "") + "\n" + RECIPE_SHAPE_NOTE
+    : "You are looking at a photo of a restaurant dish. Reverse-engineer a homemade recipe that would let a home cook recreate it: identify the " +
+      "likely dish and cuisine, then propose realistic ingredients (sensible home portions) and clear steps.\n" +
+      (hint ? 'The cook says: "' + hint + '"\n' : "") + "\n" + RECIPE_SHAPE_NOTE +
+      '\n\nAlways fill "notes" with a short line noting this recipe was recreated from a photo and is an educated guess to adjust to taste.';
   try {
     const reply = await callAnthropic([
       {
