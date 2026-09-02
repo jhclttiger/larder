@@ -541,7 +541,15 @@ function recipeFormFieldsHtml(r){
       '<div class="field"><label class="field-label">Servings</label><input type="number" min="1" id="f-servings" value="'+esc(r.servings)+'"></div>'+
     '</div>'+
     '<div class="field"><label class="field-label">Tags</label><div class="chipfield" id="f-tags">'+(r.tags||[]).map(function(t){return chipHtml(t);}).join("")+'<input type="text" placeholder="add a tag, press Enter"></div></div>'+
-    '<div class="field"><label class="field-label">Image URL (optional)</label><input type="url" id="f-image" value="'+esc(r.image)+'" placeholder="https://…"></div>'+
+    '<div class="field"><label class="field-label">Recipe photo (optional)</label>'+
+      '<div class="dropzone" id="f-image-dropzone" style="padding:14px">'+imageDropzoneInnerHtml(r.image)+'</div>'+
+      '<input type="file" id="f-image-file" accept="image/*" class="hidden">'+
+      '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">'+
+        '<input type="url" id="f-image-url" placeholder="…or paste an image link" value="'+(r.image && !isDataUrl(r.image) ? esc(r.image) : "")+'" style="flex:1">'+
+        '<button type="button" class="btn btn-sm btn-ghost'+(r.image?"":" hidden")+'" id="f-image-remove">Remove</button>'+
+      '</div>'+
+      '<p class="hint">Upload a photo from your device, or paste a link to an image already online.</p>'+
+    '</div>'+
     '<div class="field"><label class="field-label">Source link (optional)</label><input type="url" id="f-source" value="'+esc(r.sourceUrl)+'" placeholder="https://…"></div>'+
     '<div class="field"><label class="field-label">Ingredients</label><div id="f-ingredients">'+(r.ingredients&&r.ingredients.length?r.ingredients:[{qty:"",unit:"",name:"",department:""}]).map(ingredientRowHtml).join("")+'</div>'+
       '<button type="button" class="btn btn-sm" data-action="add-ingredient-row">+ Add ingredient</button></div>'+
@@ -550,6 +558,18 @@ function recipeFormFieldsHtml(r){
     '<div class="field"><label class="field-label">Notes</label><textarea id="f-notes" placeholder="Substitutions, tips, who liked it…">'+esc(r.notes)+'</textarea></div>';
 }
 function chipHtml(val){ return '<span class="chip" data-value="'+esc(val)+'">'+esc(val)+'<button type="button" onclick="this.parentElement.remove()">✕</button></span>'; }
+function isDataUrl(s){ return typeof s==="string" && s.indexOf("data:")===0; }
+function imageDropzoneInnerHtml(image){
+  return image ? '<img class="photo-preview" style="max-height:160px;margin:0" src="'+(isDataUrl(image)?image:esc(image))+'">' : '<div>📷 Click to add a photo</div>';
+}
+function blobToDataUrl(blob){
+  return new Promise(function(resolve, reject){
+    var reader = new FileReader();
+    reader.onload = function(){ resolve(reader.result); };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
 function ingredientRowHtml(i){
   i = i||{};
   return '<div class="ingredient-row">'+
@@ -563,6 +583,7 @@ function ingredientRowHtml(i){
 function stepRowHtml(s){
   return '<div class="step-row"><span class="step-num"></span><textarea placeholder="Describe this step…">'+esc(s||"")+'</textarea><button type="button" class="icon-btn" onclick="this.closest(\'.step-row\').remove()">✕</button></div>';
 }
+var formImageValue = "";
 function wireRecipeForm(original, editId){
   var body = document.getElementById("recipe-form-body");
   wireChipField(document.getElementById("f-tags"));
@@ -570,6 +591,30 @@ function wireRecipeForm(original, editId){
     if(e.target.closest('[data-action="add-ingredient-row"]')){ document.getElementById("f-ingredients").insertAdjacentHTML("beforeend", ingredientRowHtml({})); }
     if(e.target.closest('[data-action="add-step-row"]')){ document.getElementById("f-steps").insertAdjacentHTML("beforeend", stepRowHtml("")); }
   });
+
+  formImageValue = original && original.image ? original.image : "";
+  var dz = document.getElementById("f-image-dropzone");
+  var fileInput = document.getElementById("f-image-file");
+  var urlInput = document.getElementById("f-image-url");
+  var removeBtn = document.getElementById("f-image-remove");
+  function setImage(value){
+    formImageValue = value || "";
+    dz.innerHTML = imageDropzoneInnerHtml(formImageValue);
+    removeBtn.classList.toggle("hidden", !formImageValue);
+  }
+  dz.addEventListener("click", function(){ fileInput.click(); });
+  fileInput.addEventListener("change", function(){
+    var file = fileInput.files && fileInput.files[0];
+    if(!file) return;
+    dz.innerHTML = '<span class="spinner dark"></span> Processing photo…';
+    downscaleImage(file, 1000, 0.78).catch(function(){ return file; }).then(blobToDataUrl).then(function(dataUrl){
+      urlInput.value = "";
+      setImage(dataUrl);
+    }).catch(function(){ toast("Couldn't process that photo — try a different one","warn"); setImage(formImageValue); });
+  });
+  urlInput.addEventListener("input", function(){ formImageValue = urlInput.value.trim(); removeBtn.classList.toggle("hidden", !formImageValue); });
+  removeBtn.addEventListener("click", function(){ urlInput.value=""; setImage(""); });
+
   document.getElementById("save-recipe-btn").addEventListener("click", function(){
     var data = readRecipeForm();
     if(!data.title){ toast("Give the recipe a title first","warn"); return; }
@@ -600,7 +645,7 @@ function readRecipeForm(){
     prepTime: Number(document.getElementById("f-prep").value)||0,
     cookTime: Number(document.getElementById("f-cook").value)||0,
     servings: Number(document.getElementById("f-servings").value)||4,
-    image: document.getElementById("f-image").value.trim(),
+    image: formImageValue,
     sourceUrl: document.getElementById("f-source").value.trim(),
     ingredients: ingredients,
     steps: steps,
